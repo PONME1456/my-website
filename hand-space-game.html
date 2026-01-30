@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+
+<html lang="th">
+
+<head>
+
+  <meta charset="UTF-8" />
+
+  <title>Hand Space Shooter</title>
+
+  <style>
+
+    * { box-sizing: border-box; }
+
+    body {
+
+      margin: 0;
+
+      background: #050608;
+
+      color: #fff;
+
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+      overflow: hidden;
+
+    }
+
+    #info {
+
+      position: fixed;
+
+      top: 10px;
+
+      left: 10px;
+
+      background: rgba(0, 0, 0, 0.6);
+
+      padding: 10px 14px;
+
+      border-radius: 10px;
+
+      font-size: 14px;
+
+      z-index: 20;
+
+    }
+
+    #info b { color: #00ffc8; }
+
+    #scoreBox {
+
+      position: fixed;
+
+      top: 10px;
+
+      right: 10px;
+
+      background: rgba(0,0,0,0.6);
+
+      padding: 8px 12px;
+
+      border-radius: 10px;
+
+      font-size: 14px;
+
+      z-index: 20;
+
+    }
+
+    #gameCanvas {
+
+      position: fixed;
+
+      inset: 0;
+
+    }
+
+    /* กล้องจริงซ่อนไว้ ใช้เป็น source ให้ handCanvas */
+
+    #video {
+
+      display: none;
+
+    }
+
+    /* พรีวิวกล้อง + เส้นมือ */
+
+    #handCanvas {
+
+      position: fixed;
+
+      right: 10px;
+
+      bottom: 10px;
+
+      width: 220px;
+
+      border-radius: 10px;
+
+      border: 2px solid #444;
+
+      transform: scaleX(-1); /* ให้เหมือนกระจก */
+
+      z-index: 15;
+
+      background: #000;
+
+    }
+
+  </style>
+
+  <!-- MediaPipe (fix เวอร์ชันให้เสถียร) -->
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js" crossorigin="anonymous"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" crossorigin="anonymous"></script>
+
+</head>
+
+<body>
+
+  <div id="info">
+
+    🎮 <b>Hand Space Shooter</b><br/>
+
+    ✋ ยกมือให้กล้องเห็น (ดูมุมขวาล่างว่ามือโผล่ไหม)<br/>
+
+    ➡ ขยับมือซ้าย-ขวา = บังคับยาน<br/>
+
+    🫰 นิ้วโป้งแตะปลายนิ้วชี้ = ยิงปืน<br/>
+
+    💥 ยิงศัตรูที่บินลงมาให้ทัน!
+
+  </div>
+
+  <div id="scoreBox">
+
+    Score: <span id="score">0</span>
+
+  </div>
+
+  <video id="video" playsinline></video>
+
+  <canvas id="handCanvas"></canvas>
+
+  <canvas id="gameCanvas"></canvas>
+
+  <script>
+
+    // ===== DOM & canvas =====
+
+    const video = document.getElementById("video");
+
+    const handCanvas = document.getElementById("handCanvas");
+
+    const handCtx = handCanvas.getContext("2d");
+
+    const gameCanvas = document.getElementById("gameCanvas");
+
+    const gameCtx = gameCanvas.getContext("2d");
+
+    const scoreSpan = document.getElementById("score");
+
+    function resizeCanvas() {
+
+      gameCanvas.width = window.innerWidth;
+
+      gameCanvas.height = window.innerHeight;
+
+      handCanvas.width = 320;   // ขนาดจริง
+
+      handCanvas.height = 240;
+
+    }
+
+    resizeCanvas();
+
+    window.addEventListener("resize", resizeCanvas);
+
+    // ===== สถานะจากมือ =====
+
+    let handXNorm = null;  // 0..1
+
+    let pinchNow = false;  // หนีบโป้งแตะนิ้วชี้อยู่ไหม
+
+    // ===== สถานะเกม =====
+
+    let lastTime = 0;
+
+    let score = 0;
+
+    let enemies = [];
+
+    let bullets = [];
+
+    let stars = [];
+
+    const player = {
+
+      x: gameCanvas.width / 2,
+
+      y: gameCanvas.height - 80,
+
+      width: 40,
+
+      height: 60,
+
+      color: "#00ffc8",
+
+    };
+
+    let lastPinchInGame = false;
+
+    let enemySpawnTimer = 0;
+
+    // ดาวพื้นหลัง
+
+    function initStars() {
+
+      stars = [];
+
+      for (let i = 0; i < 80; i++) {
+
+        stars.push({
+
+          x: Math.random() * gameCanvas.width,
+
+          y: Math.random() * gameCanvas.height,
+
+          r: Math.random() * 1.5 + 0.5,
+
+          speed: Math.random() * 30 + 10,
+
+        });
+
+      }
+
+    }
+
+    initStars();
+
+    // ===== MediaPipe Hands =====
+
+    const hands = new Hands({
+
+      locateFile: file =>
+
+        `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`,
+
+    });
+
+    hands.setOptions({
+
+      maxNumHands: 1,
+
+      modelComplexity: 1,
+
+      minDetectionConfidence: 0.6,
+
+      minTrackingConfidence: 0.6,
+
+    });
+
+    hands.onResults(onHandResults);
+
+    let camera = null;
+
+    async function initCamera() {
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+
+        alert("เบราว์เซอร์นี้ไม่รองรับกล้อง (getUserMedia)");
+
+        return;
+
+      }
+
+      camera = new Camera(video, {
+
+        onFrame: async () => {
+
+          try {
+
+            await hands.send({ image: video });
+
+          } catch (e) {
+
+            console.error("ส่งภาพเข้า hands พัง:", e);
+
+          }
+
+        },
+
+        width: 640,
+
+        height: 480,
+
+      });
+
+      camera.start()
+
+        .then(() => console.log("✅ camera started"))
+
+        .catch(err => {
+
+          console.error("เปิดกล้องไม่สำเร็จ:", err);
+
+          alert("เปิดกล้องไม่ได้: " + err.name);
+
+        });
+
+    }
+
+    // callback ทุกครั้งที่ MediaPipe ประมวลผลเสร็จ
+
+    function onHandResults(results) {
+
+      handCtx.save();
+
+      handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+
+      // วาดภาพจากกล้องลง preview
+
+      handCtx.drawImage(results.image, 0, 0, handCanvas.width, handCanvas.height);
+
+      const lmList = results.multiHandLandmarks || [];
+
+      if (
+
+        lmList.length > 0 &&
+
+        window.drawConnectors &&
+
+        window.drawLandmarks &&
+
+        window.HAND_CONNECTIONS
+
+      ) {
+
+        const landmarks = lmList[0];
+
+        // วาดโครงมือให้เห็นชัด ๆ
+
+        drawConnectors(handCtx, landmarks, HAND_CONNECTIONS, { lineWidth: 2 });
+
+        drawLandmarks(handCtx, landmarks, { lineWidth: 1 });
+
+        const indexTip = landmarks[8]; // ปลายนิ้วชี้
+
+        const thumbTip = landmarks[4]; // ปลายนิ้วโป้ง
+
+        // พิกัดนิ้วชี้ 0..1 (แกน x) → กลับด้านให้เหมือนกระจก
+
+        handXNorm = 1 - indexTip.x;
+
+        // ระยะโป้ง-ชี้ไว้เช็ค pinch
+
+        const dx = thumbTip.x - indexTip.x;
+
+        const dy = thumbTip.y - indexTip.y;
+
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        pinchNow = dist < 0.05; // ปรับได้ ถ้ามันดื้อ
+
+      } else {
+
+        // ไม่มีมือในเฟรม
+
+        handXNorm = null;
+
+        pinchNow = false;
+
+      }
+
+      handCtx.restore();
+
+    }
+
+    initCamera();
+
+    // ===== ฟังก์ชันเกม =====
+
+    function spawnEnemy() {
+
+      const w = 40;
+
+      const h = 40;
+
+      enemies.push({
+
+        x: Math.random() * (gameCanvas.width - w) + w / 2,
+
+        y: -50,
+
+        width: w,
+
+        height: h,
+
+        speed: 80 + Math.random() * 80,
+
+        color: "#ff4b81",
+
+      });
+
+    }
+
+    function spawnBullet() {
+
+      bullets.push({
+
+        x: player.x,
+
+        y: player.y - player.height / 2,
+
+        radius: 5,
+
+        speed: 300,
+
+        color: "#ffd447",
+
+      });
+
+    }
+
+    function rectsOverlap(a, b) {
+
+      return !(
+
+        a.x + a.width / 2 < b.x - b.width / 2 ||
+
+        a.x - a.width / 2 > b.x + b.width / 2 ||
+
+        a.y + a.height / 2 < b.y - b.height / 2 ||
+
+        a.y - a.height / 2 > b.y + b.height / 2
+
+      );
+
+    }
+
+    function bulletHitsEnemy(bullet, enemy) {
+
+      const bRect = {
+
+        x: bullet.x,
+
+        y: bullet.y,
+
+        width: bullet.radius * 2,
+
+        height: bullet.radius * 2,
+
+      };
+
+      return rectsOverlap(
+
+        { x: enemy.x, y: enemy.y, width: enemy.width, height: enemy.height },
+
+        bRect
+
+      );
+
+    }
+
+    function update(dt) {
+
+      // ดาวพื้นหลัง
+
+      for (const s of stars) {
+
+        s.y += s.speed * dt;
+
+        if (s.y > gameCanvas.height) {
+
+          s.y = -5;
+
+          s.x = Math.random() * gameCanvas.width;
+
+        }
+
+      }
+
+      // ยานตามมือ
+
+      if (handXNorm !== null) {
+
+        player.x = handXNorm * gameCanvas.width;
+
+      }
+
+      player.x = Math.max(
+
+        player.width / 2,
+
+        Math.min(gameCanvas.width - player.width / 2, player.x)
+
+      );
+
+      // pinch จาก false -> true = ยิง 1 นัด
+
+      if (pinchNow && !lastPinchInGame) {
+
+        spawnBullet();
+
+      }
+
+      lastPinchInGame = pinchNow;
+
+      // กระสุนขึ้น
+
+      bullets.forEach(b => {
+
+        b.y -= b.speed * dt;
+
+      });
+
+      bullets = bullets.filter(b => b.y + b.radius > 0);
+
+      // spawn ศัตรู
+
+      enemySpawnTimer += dt;
+
+      if (enemySpawnTimer > 1.0) {
+
+        enemySpawnTimer = 0;
+
+        spawnEnemy();
+
+      }
+
+      // ศัตรูลง
+
+      enemies.forEach(e => {
+
+        e.y += e.speed * dt;
+
+      });
+
+      enemies = enemies.filter(e => e.y - e.height / 2 < gameCanvas.height + 50);
+
+      // ชนกัน
+
+      for (let i = enemies.length - 1; i >= 0; i--) {
+
+        let dead = false;
+
+        for (let j = bullets.length - 1; j >= 0; j--) {
+
+          if (bulletHitsEnemy(bullets[j], enemies[i])) {
+
+            bullets.splice(j, 1);
+
+            dead = true;
+
+            score += 10;
+
+            scoreSpan.textContent = score;
+
+            break;
+
+          }
+
+        }
+
+        if (dead) enemies.splice(i, 1);
+
+      }
+
+    }
+
+    function draw() {
+
+      // background
+
+      const grad = gameCtx.createLinearGradient(0, 0, 0, gameCanvas.height);
+
+      grad.addColorStop(0, "#050608");
+
+      grad.addColorStop(1, "#080022");
+
+      gameCtx.fillStyle = grad;
+
+      gameCtx.fillRect(0, 0, gameCanvas.width, gameCanvas.height);
+
+      // stars
+
+      gameCtx.fillStyle = "#ffffff";
+
+      for (const s of stars) {
+
+        gameCtx.beginPath();
+
+        gameCtx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+
+        gameCtx.fill();
+
+      }
+
+      // player ship
+
+      gameCtx.save();
+
+      gameCtx.translate(player.x, player.y);
+
+      gameCtx.fillStyle = player.color;
+
+      gameCtx.beginPath();
+
+      gameCtx.moveTo(0, -player.height / 2);
+
+      gameCtx.lineTo(-player.width / 2, player.height / 2);
+
+      gameCtx.lineTo(player.width / 2, player.height / 2);
+
+      gameCtx.closePath();
+
+      gameCtx.fill();
+
+      // flame
+
+      gameCtx.fillStyle = "#ff7b54";
+
+      gameCtx.beginPath();
+
+      gameCtx.moveTo(-player.width / 4, player.height / 2);
+
+      gameCtx.lineTo(0, player.height / 2 + 15);
+
+      gameCtx.lineTo(player.width / 4, player.height / 2);
+
+      gameCtx.fill();
+
+      gameCtx.restore();
+
+      // bullets
+
+      for (const b of bullets) {
+
+        gameCtx.fillStyle = b.color;
+
+        gameCtx.beginPath();
+
+        gameCtx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+
+        gameCtx.fill();
+
+      }
+
+      // enemies
+
+      for (const e of enemies) {
+
+        gameCtx.save();
+
+        gameCtx.translate(e.x, e.y);
+
+        gameCtx.fillStyle = e.color;
+
+        gameCtx.fillRect(-e.width / 2, -e.height / 2, e.width, e.height);
+
+        // ตาศัตรู
+
+        gameCtx.fillStyle = "#fff";
+
+        gameCtx.fillRect(-e.width / 4, -e.height / 6, 6, 6);
+
+        gameCtx.fillRect(e.width / 4 - 6, -e.height / 6, 6, 6);
+
+        gameCtx.restore();
+
+      }
+
+    }
+
+    function gameLoop(ts) {
+
+      if (!lastTime) lastTime = ts;
+
+      const dt = (ts - lastTime) / 1000;
+
+      lastTime = ts;
+
+      update(dt);
+
+      draw();
+
+      requestAnimationFrame(gameLoop);
+
+    }
+
+    requestAnimationFrame(gameLoop);
+
+  </script>
+
+</body>
+
+</html>
